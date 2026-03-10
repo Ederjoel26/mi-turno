@@ -1,0 +1,68 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mi-turno-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mi_turno}
+      POSTGRES_USER: ${POSTGRES_USER:-mi_turno_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mi_turno_pass}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mi_turno_user} -d ${POSTGRES_DB:-mi_turno}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: mi-turno-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+      DATABASE_URL: postgresql://${POSTGRES_USER:-mi_turno_user}:${POSTGRES_PASSWORD:-mi_turno_pass}@postgres:5432/${POSTGRES_DB:-mi_turno}
+      BAILEYS_AUTH_DIR: ${BAILEYS_AUTH_DIR:-auth_info_baileys}
+      BAILEYS_AUTO_CONNECT: ${BAILEYS_AUTO_CONNECT:-false}
+    ports:
+      - "${BACKEND_PORT:-3001}:3001"
+    volumes:
+      - ./backend:/app
+      - backend_node_modules:/app/node_modules
+      - baileys_auth:/app/auth_info_baileys
+    command: sh -c "pnpm dev"
+
+  # frontend:
+  #   build:
+  #     context: ./frontend
+  #     dockerfile: Dockerfile
+  #   container_name: mi-turno-frontend
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - backend
+  #   environment:
+  #     NODE_ENV: development
+  #     PORT: 3000
+  #     NEXT_PUBLIC_API_URL: http://localhost:${BACKEND_PORT:-3001}
+  #   ports:
+  #     - "${FRONTEND_PORT:-3000}:3000"
+  #   volumes:
+  #     - ./frontend:/app
+  #     - frontend_node_modules:/app/node_modules
+  #   command: sh -c "pnpm install && pnpm dev"
+
+volumes:
+  postgres_data:
+  backend_node_modules:
+  frontend_node_modules:
+  baileys_auth:

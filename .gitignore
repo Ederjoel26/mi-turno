@@ -1,0 +1,13 @@
+node_modules/
+**/node_modules/
+
+.env
+backend/.env
+frontend/.env
+
+dist/
+**/dist/
+.next/
+**/.next/
+
+.DS_Store
