@@ -2,7 +2,8 @@ import {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeWASocket,
-  useMultiFileAuthState
+  type WASocket,
+  useMultiFileAuthState,
 } from "@whiskeysockets/baileys";
 import { env } from "../config/env.js";
 
@@ -17,28 +18,38 @@ const status: BaileysStatus = {
   connected: false,
   connecting: false,
   lastQr: null,
-  lastDisconnectReason: null
+  lastDisconnectReason: null,
 };
 
 let connectingPromise: Promise<void> | null = null;
+let sock: WASocket | null = null;
+
+function getStatusCode(error: unknown): number | undefined {
+  return (error as { output?: { statusCode?: number } } | undefined)?.output
+    ?.statusCode;
+}
 
 export function getBaileysStatus(): BaileysStatus {
   return { ...status };
 }
 
 export async function connectBaileys(): Promise<void> {
+  if (status.connected || sock) return;
+
   if (connectingPromise) return connectingPromise;
 
   connectingPromise = (async () => {
     status.connecting = true;
     status.lastDisconnectReason = null;
 
-    const { state, saveCreds } = await useMultiFileAuthState(env.baileysAuthDir);
+    const { state, saveCreds } = await useMultiFileAuthState(
+      env.baileysAuthDir,
+    );
     const { version } = await fetchLatestBaileysVersion();
 
-    const sock = makeWASocket({
+    sock = makeWASocket({
       version,
-      auth: state
+      auth: state,
     });
 
     sock.ev.on("creds.update", saveCreds);
@@ -57,17 +68,35 @@ export async function connectBaileys(): Promise<void> {
       if (update.connection === "close") {
         status.connected = false;
         status.connecting = false;
+        sock = null;
 
-        const statusCode = (update.lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)
-          ?.output?.statusCode;
+        const statusCode = getStatusCode(update.lastDisconnect?.error);
 
         status.lastDisconnectReason =
-          statusCode === DisconnectReason.loggedOut ? "logged_out" : "disconnected";
+          statusCode === DisconnectReason.loggedOut
+            ? "logged_out"
+            : statusCode
+              ? `disconnected_${statusCode}`
+              : "disconnected";
+
+        if (statusCode !== DisconnectReason.loggedOut) {
+          setTimeout(() => {
+            void connectBaileys();
+          }, 2000);
+        }
       }
     });
-  })().finally(() => {
-    connectingPromise = null;
-  });
+  })()
+    .catch((error) => {
+      status.connected = false;
+      status.connecting = false;
+      sock = null;
+      status.lastDisconnectReason = (error as Error).message;
+      console.error("Baileys connect error:", error);
+    })
+    .finally(() => {
+      connectingPromise = null;
+    });
 
   return connectingPromise;
 }

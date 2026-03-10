@@ -1,4 +1,6 @@
 import express from "express";
+import QRCode from "qrcode";
+
 import { env } from "./config/env.js";
 import { checkDbConnection, pool } from "./db/pool.js";
 import { connectBaileys, getBaileysStatus } from "./services/baileys.js";
@@ -24,13 +26,60 @@ app.get("/baileys/status", (_req, res) => {
   res.json({ ok: true, ...getBaileysStatus() });
 });
 
+app.get("/baileys/qr", async (req, res) => {
+  const status = getBaileysStatus();
+
+  if (!status.lastQr) {
+    res.status(404).json({
+      ok: false,
+      error: "QR not available yet. Run POST /baileys/connect first.",
+    });
+    return;
+  }
+
+  const format = String(req.query.format ?? "svg").toLowerCase();
+
+  try {
+    if (format === "terminal") {
+      const terminalQr = await QRCode.toString(status.lastQr, {
+        type: "terminal",
+        small: true,
+      });
+      res.type("text/plain").send(terminalQr);
+      return;
+    }
+
+    if (format === "raw") {
+      res.json({ ok: true, qr: status.lastQr });
+      return;
+    }
+
+    const svgQr = await QRCode.toString(status.lastQr, {
+      type: "svg",
+      margin: 1,
+      width: 320,
+    });
+    res.type("image/svg+xml").send(svgQr);
+  } catch (error) {
+    res.status(500).json({ ok: false, error: (error as Error).message });
+  }
+});
+
 app.post("/baileys/connect", async (_req, res) => {
   try {
-    await connectBaileys();
+    await Promise.race([
+      connectBaileys(),
+      new Promise((resolve) => setTimeout(resolve, 12000)),
+    ]);
+
+    const status = getBaileysStatus();
+
     res.json({
       ok: true,
-      message: "Baileys connection initialized",
-      ...getBaileysStatus(),
+      message: status.connected
+        ? "Baileys connected"
+        : "Baileys connection initialized, check /baileys/status or /baileys/qr",
+      ...status,
     });
   } catch (error) {
     res.status(500).json({ ok: false, error: (error as Error).message });

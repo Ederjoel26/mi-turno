@@ -36,3 +36,4 @@ Servicios:
 - `GET /db/ping`
 - `GET /baileys/status`
 - `POST /baileys/connect`
+- `GET /baileys/qr?format=svg|terminal|raw`
