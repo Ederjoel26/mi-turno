@@ -3,6 +3,14 @@ import QRCode from "qrcode";
 
 import { env } from "./config/env.js";
 import { checkDbConnection, pool } from "./db/pool.js";
+import {
+  AppointmentNotFoundError,
+  DomainValidationError,
+  SlotConflictError,
+  cancelAppointment,
+  createAppointmentAtomic,
+  getAvailableSlots,
+} from "./services/booking.js";
 import { connectBaileys, getBaileysStatus } from "./services/baileys.js";
 
 const app = express();
@@ -18,6 +26,144 @@ app.get("/db/ping", async (_req, res) => {
     const now = await checkDbConnection();
     res.json({ ok: true, now });
   } catch (error) {
+    res.status(500).json({ ok: false, error: (error as Error).message });
+  }
+});
+
+app.get("/availability", async (req, res) => {
+  const tenantId = String(req.query.tenantId ?? "").trim();
+  const providerId = String(req.query.providerId ?? "").trim();
+  const date = String(req.query.date ?? "").trim();
+  const timezone = String(req.query.timezone ?? "America/Mexico_City").trim();
+  const durationMinutes = Number(req.query.durationMinutes ?? 0);
+  const slotStepMinutes = req.query.slotStepMinutes
+    ? Number(req.query.slotStepMinutes)
+    : undefined;
+
+  if (!tenantId || !providerId || !date || !durationMinutes) {
+    res.status(400).json({
+      ok: false,
+      error:
+        "Missing required query params: tenantId, providerId, date, durationMinutes",
+    });
+    return;
+  }
+
+  try {
+    const slots = await getAvailableSlots({
+      tenantId,
+      providerId,
+      date,
+      timezone,
+      serviceDurationMinutes: durationMinutes,
+      slotStepMinutes,
+    });
+
+    res.json({ ok: true, count: slots.length, slots });
+  } catch (error) {
+    if (error instanceof DomainValidationError) {
+      res.status(400).json({ ok: false, error: error.message });
+      return;
+    }
+
+    res.status(500).json({ ok: false, error: (error as Error).message });
+  }
+});
+
+app.post("/appointments", async (req, res) => {
+  const {
+    tenantId,
+    providerId,
+    serviceId,
+    startsAt,
+    durationMinutes,
+    customerPhoneE164,
+    customerName,
+    notes,
+  } = req.body as {
+    tenantId?: string;
+    providerId?: string;
+    serviceId?: string | null;
+    startsAt?: string;
+    durationMinutes?: number;
+    customerPhoneE164?: string;
+    customerName?: string;
+    notes?: string;
+  };
+
+  if (
+    !tenantId ||
+    !providerId ||
+    !startsAt ||
+    !durationMinutes ||
+    !customerPhoneE164 ||
+    !customerName
+  ) {
+    res.status(400).json({
+      ok: false,
+      error:
+        "Missing required body fields: tenantId, providerId, startsAt, durationMinutes, customerPhoneE164, customerName",
+    });
+    return;
+  }
+
+  try {
+    const appointment = await createAppointmentAtomic({
+      tenantId,
+      providerId,
+      serviceId: serviceId ?? null,
+      startsAt,
+      durationMinutes,
+      customerPhoneE164,
+      customerName,
+      notes,
+      createdBy: "bot",
+    });
+
+    res.status(201).json({ ok: true, appointment });
+  } catch (error) {
+    if (error instanceof DomainValidationError) {
+      res.status(400).json({ ok: false, error: error.message });
+      return;
+    }
+
+    if (error instanceof SlotConflictError) {
+      res.status(409).json({ ok: false, error: error.message });
+      return;
+    }
+
+    res.status(500).json({ ok: false, error: (error as Error).message });
+  }
+});
+
+app.post("/appointments/:appointmentId/cancel", async (req, res) => {
+  const appointmentId = String(req.params.appointmentId ?? "").trim();
+  const tenantId = String(req.body?.tenantId ?? "").trim();
+  const reason =
+    typeof req.body?.reason === "string" ? req.body.reason.trim() : undefined;
+
+  if (!appointmentId || !tenantId) {
+    res.status(400).json({
+      ok: false,
+      error:
+        "Missing required fields: appointmentId param and tenantId in body",
+    });
+    return;
+  }
+
+  try {
+    const appointment = await cancelAppointment(
+      tenantId,
+      appointmentId,
+      reason,
+    );
+    res.json({ ok: true, appointment });
+  } catch (error) {
+    if (error instanceof AppointmentNotFoundError) {
+      res.status(404).json({ ok: false, error: error.message });
+      return;
+    }
+
     res.status(500).json({ ok: false, error: (error as Error).message });
   }
 });
@@ -67,10 +213,7 @@ app.get("/baileys/qr", async (req, res) => {
 
 app.post("/baileys/connect", async (_req, res) => {
   try {
-    await Promise.race([
-      connectBaileys(),
-      new Promise((resolve) => setTimeout(resolve, 12000)),
-    ]);
+    connectBaileys();
 
     const status = getBaileysStatus();
 

@@ -55,22 +55,29 @@ export async function connectBaileys(): Promise<void> {
     sock.ev.on("creds.update", saveCreds);
 
     sock.ev.on("connection.update", (update) => {
-      if (update.qr) {
-        status.lastQr = update.qr;
-      }
+      const { connection, lastDisconnect, qr } = update;
+      console.log(
+        "connection",
+        connection,
+        "lastDisconnect",
+        lastDisconnect,
+        "qr",
+        qr,
+      );
+      if (qr) status.lastQr = qr;
 
-      if (update.connection === "open") {
+      if (connection === "open") {
         status.connected = true;
         status.connecting = false;
         status.lastQr = null;
       }
 
-      if (update.connection === "close") {
+      if (connection === "close") {
         status.connected = false;
         status.connecting = false;
         sock = null;
 
-        const statusCode = getStatusCode(update.lastDisconnect?.error);
+        const statusCode = getStatusCode(lastDisconnect?.error);
 
         status.lastDisconnectReason =
           statusCode === DisconnectReason.loggedOut
