@@ -1,33 +1,18 @@
 import type { WASocket } from "@whiskeysockets/baileys";
-import { pool } from "../db/pool.js";
+import { createAppointmentAtomic, getAvailableSlots } from "./booking.js";
 import {
-  getAvailableSlots,
-  createAppointmentAtomic,
-  DomainValidationError,
-  SlotConflictError,
-} from "./booking.js";
+  DEFAULT_TENANT_ID,
+  getTenantName,
+  getServices,
+  getProviders,
+  getOrCreateSession,
+  updateSession,
+  getNextAvailableDays,
+  getAppointmentsByPhone,
+  type SessionPayload,
+} from "./whatsapp-db.js";
 
-const DEFAULT_TENANT_ID = "f1388aa9-a443-4326-805d-c1ca7ef090a6";
-
-type SessionPayload = {
-  serviceId?: string;
-  serviceName?: string;
-  providerId?: string;
-  providerName?: string;
-  serviceDurationMinutes?: number;
-  date?: string;
-  slotIndex?: number;
-  slotStartsAt?: string;
-  slotEndsAt?: string;
-  customerName?: string;
-  appointments?: Array<{
-    id: string;
-    starts_at: string;
-    service_name: string;
-    provider_name: string;
-  }>;
-};
-
+// Inicializa el handler de WhatsApp - escucha mensajes entrantes
 export function setupWhatsAppHandler(sock: WASocket): void {
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
@@ -36,433 +21,364 @@ export function setupWhatsAppHandler(sock: WASocket): void {
       if (!msg.message || msg.key.fromMe) continue;
 
       const jid = msg.key.remoteJid;
-      if (!jid || (!jid.endsWith("@s.whatsapp.net") && !jid.endsWith("@lid")))
-        continue;
+      if (!jid) continue;
 
       const text =
         msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+
       if (!text) continue;
 
-      const lowerText = text.toLowerCase().trim();
+      const phone = jid.split("@")[0];
+      const lower = text.toLowerCase().trim();
 
-      if (lowerText === "*") {
-        await resetSession(jid.split("@")[0]);
+      if (lower === "*") {
+        await updateSession(phone, "menu", {});
+        const name = await getTenantName();
         await sock.sendMessage(jid, {
-          text: "🔄 Sesión reiniciada.\n\n¡Hola! 👋\nBienvenido a *La Barbería*\n\n¿Qué deseas hacer?\n1. 📅 Agendar cita\n2. 📋 Mis citas",
+          text: `👋 Bienvenido a *${name}*
+
+          1. 📅 Agendar cita
+          2. 📋 Mis citas`,
         });
         continue;
       }
 
-      console.log(`[WA] Mensaje de ${jid}: ${text}`);
-      await handleMessage(jid, text.trim(), sock);
+      const response = await handleMessage(phone, text.trim());
+
+      await sock.sendMessage(jid, { text: response });
     }
   });
 }
 
-async function handleMessage(
-  jid: string,
-  text: string,
-  sock: WASocket,
-): Promise<void> {
-  const phone = jid.split("@")[0];
-  const waPhoneE164 = `+${phone}`;
-
+// Maneja el mensaje según el estado actual de la conversación
+async function handleMessage(phone: string, text: string): Promise<string> {
   const session = await getOrCreateSession(phone);
 
-  let response = "";
+  const waPhone = `+${phone}`;
 
-  try {
-    switch (session.state) {
-      case "init":
-      case "menu":
-        response = await handleMenu(text, phone);
-        break;
+  switch (session.state) {
+    case "init":
+    case "menu":
+      return handleMenu(text, phone);
 
-      case "choose_service":
-        response = await handleChooseService(text, phone, session.payload);
-        break;
+    case "choose_service":
+      return handleChooseService(text, phone, session.payload);
 
-      case "choose_provider":
-        response = await handleChooseProvider(text, phone, session.payload);
-        break;
+    case "choose_barber":
+      return handleChooseBarber(text, phone, session.payload);
 
-      case "choose_date":
-        response = await handleChooseDate(text, phone, session.payload);
-        break;
+    case "choose_slot":
+      return handleChooseSlot(text, phone, session.payload);
 
-      case "choose_slot":
-        response = await handleChooseSlot(text, phone, session.payload);
-        break;
+    case "ask_name":
+      return handleAskName(text, phone, session.payload);
 
-      case "ask_name":
-        response = await handleAskName(text, phone, session.payload);
-        break;
+    case "confirm":
+      return handleConfirm(text, phone, session.payload, waPhone);
 
-      case "confirm":
-        response = await handleConfirm(
-          text,
-          phone,
-          session.payload,
-          waPhoneE164,
-        );
-        break;
-
-      case "show_appointments":
-        response = await handleShowAppointments(text, phone, session.payload);
-        break;
-
-      default:
-        await updateSession(phone, "init", {});
-        response = "Sesión reiniciada. Escribe * para empezar.";
-    }
-  } catch (error) {
-    console.error("[WA] Error handling message:", error);
-    response = "Ocurrió un error. Escribe * para reiniciar.";
-    await updateSession(phone, "init", {});
+    default:
+      await updateSession(phone, "menu", {});
+      return "Escribe * para volver al menú.";
   }
-
-  await sock.sendMessage(jid, { text: response });
 }
 
+// Muestra el menú principal (agendar o ver citas)
 async function handleMenu(text: string, phone: string): Promise<string> {
-  const lowerText = text.toLowerCase().trim();
+  const name = await getTenantName();
 
-  if (lowerText === "1" || lowerText.includes("agendar")) {
-    const services = await getServices(DEFAULT_TENANT_ID);
-    console.log(services);
-    if (services.length === 0) {
-      return "No hay servicios disponibles en este momento.";
+  if (text === "1") {
+    const services = await getServices();
+
+    if (!services.length) {
+      return "No hay servicios disponibles.";
     }
 
-    const payload: SessionPayload = {
-      serviceId: services[0].id,
-      serviceName: services[0].name,
-      serviceDurationMinutes: services[0].duration_minutes,
-    };
-    await updateSession(phone, "choose_service", payload);
+    await updateSession(phone, "choose_service", {});
 
-    let msg = "📅 *Agenda tu cita*\n\n";
-    msg += "Selecciona el servicio:\n\n";
+    let msg = "📅 *Selecciona servicio*\n\n";
+
     services.forEach((s, i) => {
       const price = s.price_cents ? `$${(s.price_cents / 100).toFixed(0)}` : "";
-      const duration = `${s.duration_minutes}min`;
-      msg += `${i + 1}. ${s.name} - ${duration} ${price ? `- ${price}MXN` : ""}\n`;
+
+      msg += `${i + 1}. ${s.name} (${s.duration_minutes}min) ${price}\n`;
     });
-    msg += "\nEscribe el número:";
+
     return msg;
   }
 
-  if (lowerText === "2" || lowerText.includes("mis citas")) {
-    return await showMyAppointments(phone, "show_appointments");
+  if (text === "2") {
+    return showAppointments(phone);
   }
 
-  return `¡Hola! 👋\nBienvenido a *La Barbería*\n\n¿Qué deseas hacer?\n1. 📅 Agendar cita\n2. 📋 Mis citas\n\nEscribe el número de opción:`;
+  return `👋 Bienvenido a *${name}*
+
+1. 📅 Agendar cita
+2. 📋 Mis citas`;
 }
 
+// Usuario elige un servicio, muestra barberos o días disponibles
 async function handleChooseService(
   text: string,
   phone: string,
   payload: SessionPayload,
-): Promise<string> {
-  const services = await getServices(DEFAULT_TENANT_ID);
-  const index = parseInt(text.trim()) - 1;
+) {
+  const services = await getServices();
+  const index = Number(text) - 1;
 
-  if (isNaN(index) || index < 0 || index >= services.length) {
-    return "Selección inválida. Escribe el número del servicio:";
-  }
+  if (!services[index]) return "Selecciona un servicio válido.";
 
   const service = services[index];
-  const providers = await getProvidersForService(DEFAULT_TENANT_ID, service.id);
 
-  if (providers.length === 0) {
-    await updateSession(phone, "init", {});
-    return "No hay barberos disponibles para este servicio.";
+  const barbers = await getProviders(service.id);
+
+  if (!barbers.length) {
+    return "No hay barberos disponibles para ese servicio.";
   }
 
-  const newPayload: SessionPayload = {
-    ...payload,
+  if (barbers.length === 1) {
+    const barber = barbers[0];
+
+    const days = await getNextAvailableDays(
+      barber.id,
+      service.duration_minutes || 30,
+    );
+
+    if (!days.length) {
+      return "No hay disponibilidad en los próximos días.";
+    }
+
+    await updateSession(phone, "choose_slot", {
+      serviceId: service.id,
+      serviceName: service.name,
+      serviceDurationMinutes: service.duration_minutes,
+      barberId: barber.id,
+      barberName: barber.name,
+    });
+
+    let msg = `✂️ *${service.name}*\n`;
+    msg += `👤 ${barber.name}\n\n`;
+    msg += `📅 *Selecciona día*\n\n`;
+
+    days.forEach((d, i) => {
+      const label = formatDayLabel(d);
+      msg += `${i + 1}. ${label}\n`;
+    });
+
+    msg += `\nO escribe una fecha (YYYY-MM-DD)`;
+
+    return msg;
+  }
+
+  await updateSession(phone, "choose_barber", {
     serviceId: service.id,
     serviceName: service.name,
     serviceDurationMinutes: service.duration_minutes,
-  };
-  await updateSession(phone, "choose_provider", newPayload);
-
-  let msg = `✅ *${service.name}* (${service.duration_minutes}min)\n\n`;
-  msg += "Selecciona el barbero:\n\n";
-  providers.forEach((p, i) => {
-    msg += `${i + 1}. ${p.name}\n`;
   });
-  msg += "\nEscribe el número:";
+
+  let msg = `✂️ *${service.name}*\n\nSelecciona barbero:\n\n`;
+
+  barbers.forEach((b, i) => {
+    msg += `${i + 1}. ${b.name}\n`;
+  });
 
   return msg;
 }
 
-async function handleChooseProvider(
+// Usuario elige barbero, muestra días disponibles
+async function handleChooseBarber(
   text: string,
   phone: string,
   payload: SessionPayload,
-): Promise<string> {
-  const services = await getServices(DEFAULT_TENANT_ID);
-  const service = services.find((s) => s.id === payload.serviceId);
-  if (!service) {
-    await updateSession(phone, "init", {});
-    return "Sesión expirada. Escribe * para empezar de nuevo.";
+) {
+  const barbers = await getProviders(payload.serviceId!);
+  const index = Number(text) - 1;
+
+  if (!barbers[index]) return "Selecciona un barbero válido.";
+
+  const barber = barbers[index];
+
+  const days = await getNextAvailableDays(
+    barber.id,
+    payload.serviceDurationMinutes || 30,
+  );
+
+  if (!days.length) {
+    return "No hay disponibilidad en los próximos días.";
   }
 
-  const providers = await getProvidersForService(DEFAULT_TENANT_ID, service.id);
-  const index = parseInt(text.trim()) - 1;
-
-  if (isNaN(index) || index < 0 || index >= providers.length) {
-    return "Selección inválida. Escribe el número del barbero:";
-  }
-
-  const provider = providers[index];
-  const newPayload: SessionPayload = {
+  await updateSession(phone, "choose_slot", {
     ...payload,
-    providerId: provider.id,
-    providerName: provider.name,
-  };
-  await updateSession(phone, "choose_date", newPayload);
-
-  const today = new Date();
-  const tomorrow = new Date(today);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const nextWeek = new Date(today);
-  nextWeek.setDate(nextWeek.getDate() + 7);
-
-  const formatDate = (d: Date) => d.toISOString().split("T")[0];
-
-  return `✅ *${service.name}* con *${provider.name}*\n\n`;
-}
-
-async function handleChooseDate(
-  text: string,
-  phone: string,
-  payload: SessionPayload,
-): Promise<string> {
-  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-  let date = text.trim();
-
-  if (!dateRegex.test(date)) {
-    return "Formato inválido. Escribe la fecha en formato YYYY-MM-DD\nEjemplo: 2026-03-15";
-  }
-
-  const parsedDate = new Date(`${date}T12:00:00.000Z`);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  if (parsedDate < today) {
-    return "No puedes agendar en fechas pasadas. Escribe una fecha válida (YYYY-MM-DD):";
-  }
-
-  const weekday = parsedDate.getUTCDay();
-  if (weekday === 0) {
-    return "No atendemos domingos. Elige otro día (YYYY-MM-DD):";
-  }
-
-  const slots = await getAvailableSlots({
-    tenantId: DEFAULT_TENANT_ID,
-    providerId: payload.providerId!,
-    date,
-    timezone: "America/Mexico_City",
-    serviceDurationMinutes: payload.serviceDurationMinutes || 30,
-    slotStepMinutes: 30,
+    barberId: barber.id,
+    barberName: barber.name,
   });
 
-  if (slots.length === 0) {
-    return "No hay horarios disponibles para esa fecha. Elige otra fecha (YYYY-MM-DD):";
-  }
+  let msg = `📅 *Selecciona día*\n\n`;
 
-  const newPayload: SessionPayload = { ...payload, date };
-  await updateSession(phone, "choose_slot", newPayload);
+  days.forEach((d, i) => {
+    const label = formatDayLabel(d);
+    msg += `${i + 1}. ${label}\n`;
+  });
 
-  return await formatSlotsResponse(slots, date);
+  msg += `\nO escribe una fecha (YYYY-MM-DD)`;
+
+  return msg;
 }
 
-async function formatSlotsResponse(
-  slots: Array<{ startsAt: string; endsAt: string }>,
-  date: string,
-): Promise<string> {
-  const slotsText = slots
-    .slice(0, 8)
-    .map((s, i) => {
-      const time = new Date(s.startsAt).toLocaleTimeString("es-MX", {
-        hour: "2-digit",
-        minute: "2-digit",
-        timeZone: "America/Mexico_City",
-      });
-      return `${i + 1}. ${time}`;
-    })
-    .join("\n");
-
-  return `📅 *${date}*\n\nHorarios disponibles:\n${slotsText}\n\n${slots.length > 8 ? `... y ${slots.length - 8} más` : ""}\nEscribe el número del horario:`;
-}
-
+// Elige día (1ra fase) o horario (2da fase)
 async function handleChooseSlot(
   text: string,
   phone: string,
   payload: SessionPayload,
-): Promise<string> {
+) {
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+
+  if (!payload.date) {
+    const days = await getNextAvailableDays(
+      payload.barberId!,
+      payload.serviceDurationMinutes || 30,
+    );
+
+    let selectedDate = "";
+    const index = Number(text) - 1;
+
+    if (!isNaN(index) && days[index]) {
+      selectedDate = days[index];
+    } else if (dateRegex.test(text)) {
+      selectedDate = text;
+    } else {
+      return "Selecciona un día válido.";
+    }
+
+    const slots = await getAvailableSlots({
+      tenantId: DEFAULT_TENANT_ID,
+      providerId: payload.barberId!,
+      date: selectedDate,
+      timezone: "America/Mexico_City",
+      serviceDurationMinutes: payload.serviceDurationMinutes || 30,
+      slotStepMinutes: 30,
+    });
+
+    if (!slots.length) {
+      return "No hay horarios disponibles ese día.";
+    }
+
+    await updateSession(phone, "choose_slot", {
+      ...payload,
+      date: selectedDate,
+    });
+
+    let msg = `⏰ *Horarios disponibles*\n\n`;
+
+    slots.slice(0, 8).forEach((s, i) => {
+      const time = new Date(s.startsAt).toLocaleTimeString("es-MX", {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+
+      msg += `${i + 1}. ${time}\n`;
+    });
+
+    return msg;
+  }
+
   const slots = await getAvailableSlots({
     tenantId: DEFAULT_TENANT_ID,
-    providerId: payload.providerId!,
-    date: payload.date!,
+    providerId: payload.barberId!,
+    date: payload.date,
     timezone: "America/Mexico_City",
     serviceDurationMinutes: payload.serviceDurationMinutes || 30,
     slotStepMinutes: 30,
   });
 
-  const index = parseInt(text.trim()) - 1;
+  const index = Number(text) - 1;
 
-  if (isNaN(index) || index < 0 || index >= slots.length) {
-    return "Selección inválida. Escribe el número del horario:";
-  }
+  if (!slots[index]) return "Selecciona horario válido.";
 
   const slot = slots[index];
-  const newPayload: SessionPayload = {
+
+  await updateSession(phone, "ask_name", {
     ...payload,
-    slotIndex: index,
     slotStartsAt: slot.startsAt,
     slotEndsAt: slot.endsAt,
-  };
-  await updateSession(phone, "ask_name", newPayload);
-
-  const dateTime = new Date(slot.startsAt).toLocaleString("es-MX", {
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: "America/Mexico_City",
   });
 
-  return `📋 *Confirma tu cita*\n\n`;
+  return "Escribe tu nombre:";
 }
 
+// Pide el nombre del cliente antes de confirmar
 async function handleAskName(
   text: string,
   phone: string,
   payload: SessionPayload,
-): Promise<string> {
-  const customerName = text.trim();
+) {
+  if (text.length < 2) return "Escribe tu nombre completo.";
 
-  if (customerName.length < 2) {
-    return "Por favor ingresa tu nombre completo:";
-  }
+  await updateSession(phone, "confirm", {
+    ...payload,
+    customerName: text,
+  });
 
-  const newPayload: SessionPayload = { ...payload, customerName };
-  await updateSession(phone, "confirm", newPayload);
-
-  const dateTime = new Date(payload.slotStartsAt!).toLocaleString("es-MX", {
+  const date = new Date(payload.slotStartsAt!).toLocaleString("es-MX", {
     weekday: "long",
     day: "numeric",
     month: "long",
     hour: "2-digit",
     minute: "2-digit",
-    timeZone: "America/Mexico_City",
   });
 
-  return `📋 *Confirma tu cita*\n\n`;
+  return `📋 *Confirma tu cita*
+
+Servicio: ${payload.serviceName}
+Barbero: ${payload.barberName}
+Fecha: ${date}
+Nombre: ${text}
+
+Responde:
+1 para confirmar
+2 para cancelar`;
 }
 
+// Confirma o cancela la cita
 async function handleConfirm(
   text: string,
   phone: string,
   payload: SessionPayload,
-  waPhoneE164: string,
-): Promise<string> {
-  const lowerText = text.toLowerCase().trim();
+  waPhone: string,
+) {
+  if (text === "1") {
+    const appointment = await createAppointmentAtomic({
+      tenantId: DEFAULT_TENANT_ID,
+      providerId: payload.barberId!,
+      serviceId: payload.serviceId!,
+      startsAt: payload.slotStartsAt!,
+      durationMinutes: payload.serviceDurationMinutes!,
+      customerPhoneE164: waPhone,
+      customerName: payload.customerName!,
+      createdBy: "bot",
+    });
 
-  if (
-    lowerText === "si" ||
-    lowerText === "sí" ||
-    lowerText === "1" ||
-    lowerText === "confirmar" ||
-    lowerText === "y" ||
-    lowerText === "yes"
-  ) {
-    try {
-      const appointment = await createAppointmentAtomic({
-        tenantId: DEFAULT_TENANT_ID,
-        providerId: payload.providerId!,
-        serviceId: payload.serviceId!,
-        startsAt: payload.slotStartsAt!,
-        durationMinutes: payload.serviceDurationMinutes || 30,
-        customerPhoneE164: waPhoneE164,
-        customerName: payload.customerName!,
-        createdBy: "bot",
-      });
+    await updateSession(phone, "done", {});
 
-      await updateSession(phone, "init", {});
+    return `✅ Cita confirmada
 
-      const dateTime = new Date(appointment.startsAt).toLocaleString("es-MX", {
-        weekday: "long",
-        day: "numeric",
-        month: "long",
-        hour: "2-digit",
-        minute: "2-digit",
-        timeZone: "America/Mexico_City",
-      });
-
-      return `✅ *Cita Confirmada!*\n\n`;
-    } catch (error) {
-      console.error("[WA] Error creating appointment:", error);
-      if (error instanceof SlotConflictError) {
-        return "❌ El horario ya no está disponible. Escribe * para empezar de nuevo.";
-      }
-      return "❌ No se pudo agendar la cita. Escribe * para intentar de nuevo.";
-    }
+Te esperamos en la barbería 💈`;
   }
 
-  if (lowerText === "no" || lowerText === "cancelar" || lowerText === "c") {
-    await updateSession(phone, "init", {});
-    return "❌ Cita cancelada.\n\n¿Algo más? Escribe:\n1. 📅 Agendar cita\n2. 📋 Mis citas";
-  }
+  await updateSession(phone, "menu", {});
 
-  return "Responde *sí* para confirmar o *no* para cancelar:";
+  return "❌ Cita cancelada.\n\nEscribe * para volver al menú.";
 }
 
-async function showMyAppointments(
-  phone: string,
-  newState: string = "menu",
-): Promise<string> {
-  const waPhoneE164 = `+${phone}`;
+// Muestra las citas agendadas del cliente
+async function showAppointments(phone: string) {
+  const rows = await getAppointmentsByPhone(phone);
 
-  const result = await pool.query<{
-    id: string;
-    starts_at: Date;
-    status: string;
-    service_name: string;
-    provider_name: string;
-  }>(
-    `SELECT a.id, a.starts_at, a.status, s.name as service_name, p.name as provider_name
-     FROM appointments a
-     JOIN services s ON s.id = a.service_id
-     JOIN providers p ON p.id = a.provider_id
-     JOIN customers c ON c.id = a.customer_id
-     WHERE c.wa_phone_e164 = $1 AND a.status IN ('pending', 'confirmed')
-     ORDER BY a.starts_at ASC
-     LIMIT 5`,
-    [waPhoneE164],
-  );
-
-  if (result.rows.length === 0) {
-    if (newState === "show_appointments") {
-      await updateSession(phone, "menu", {});
-    }
-    return "📋 No tienes citas agendadas.\n\n¿Deseas agendar una?\n1. 📅 Agendar cita\n2. 📋 Mis citas";
-  }
-
-  const appointments = result.rows.map((row) => ({
-    id: row.id,
-    starts_at: row.starts_at.toISOString(),
-    service_name: row.service_name,
-    provider_name: row.provider_name,
-  }));
+  if (!rows.length) return "📋 No tienes citas.";
 
   let msg = "📋 *Tus citas:*\n\n";
-  result.rows.forEach((row, i) => {
-    const dateTime = new Date(row.starts_at).toLocaleString("es-MX", {
+
+  rows.forEach((r, i) => {
+    const date = new Date(r.starts_at).toLocaleString("es-MX", {
       weekday: "short",
       day: "numeric",
       month: "short",
@@ -470,81 +386,49 @@ async function showMyAppointments(
       minute: "2-digit",
       timeZone: "America/Mexico_City",
     });
-    msg += `${i + 1}. 📅 ${dateTime}\n   ${row.service_name} con ${row.provider_name}\n\n`;
+
+    msg += `${i + 1}. 📅 ${date}\n   ${r.service} con ${r.provider}\n\n`;
   });
 
   msg += "Escribe * para volver al menú.";
 
-  if (newState === "show_appointments") {
-    await updateSession(phone, "show_appointments", { appointments });
-  }
-
   return msg;
 }
 
-async function handleShowAppointments(
-  text: string,
-  phone: string,
-  payload: SessionPayload,
-): Promise<string> {
-  const lowerText = text.toLowerCase().trim();
+// Formatea la fecha para mostrar "Hoy", "Mañana" o "Vie 13 Mar"
+function formatDayLabel(dateStr: string): string {
+  const d = new Date(dateStr + "T00:00:00");
+  const weekdays = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
+  const months = [
+    "Ene",
+    "Feb",
+    "Mar",
+    "Abr",
+    "May",
+    "Jun",
+    "Jul",
+    "Ago",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dic",
+  ];
 
-  if (lowerText === "*" || lowerText === "menu" || lowerText === "volver") {
-    await updateSession(phone, "menu", {});
-    return "✅\n\n¿Qué deseas hacer?\n1. 📅 Agendar cita\n2. 📋 Mis citas";
-  }
+  const weekday = weekdays[d.getDay()];
+  const day = d.getDate();
+  const month = months[d.getMonth()];
 
-  return showMyAppointments(phone, "show_appointments");
-}
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const targetDate = new Date(dateStr + "T00:00:00");
+  targetDate.setHours(0, 0, 0, 0);
 
-async function resetSession(phone: string): Promise<void> {
-  await updateSession(phone, "init", {});
-}
-
-async function getServices(tenantId: string) {
-  const result = await pool.query<{
-    id: string;
-    name: string;
-    price_cents: number | null;
-    duration_minutes: number;
-  }>(
-    "SELECT id, name, price_cents, duration_minutes FROM services WHERE tenant_id = $1 AND is_active = TRUE ORDER BY name",
-    [tenantId],
+  const diffDays = Math.round(
+    (targetDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24),
   );
-  return result.rows;
-}
 
-async function getProvidersForService(tenantId: string, serviceId: string) {
-  const result = await pool.query<{ id: string; name: string }>(
-    `SELECT p.id, p.name 
-     FROM providers p
-     JOIN provider_services ps ON ps.provider_id = p.id
-     WHERE p.tenant_id = $1 AND ps.service_id = $2 AND p.is_active = TRUE
-     ORDER BY p.name`,
-    [tenantId, serviceId],
-  );
-  return result.rows;
-}
+  if (diffDays === 0) return `Hoy - ${weekday} ${day}`;
+  if (diffDays === 1) return `Mañana - ${weekday} ${day}`;
 
-async function getOrCreateSession(phone: string) {
-  const res = await pool.query(
-    `INSERT INTO conversation_sessions (tenant_id, wa_phone_e164, state, payload)
-     VALUES ($1, $2, 'init', '{}')
-     ON CONFLICT (tenant_id, wa_phone_e164) DO UPDATE SET updated_at = NOW()
-     RETURNING state, payload`,
-    [DEFAULT_TENANT_ID, phone],
-  );
-  return res.rows[0];
-}
-
-async function updateSession(
-  phone: string,
-  state: string,
-  payload: SessionPayload,
-) {
-  await pool.query(
-    `UPDATE conversation_sessions SET state = $1, payload = $2 
-     WHERE wa_phone_e164 = $3 AND tenant_id = $4`,
-    [state, JSON.stringify(payload), phone, DEFAULT_TENANT_ID],
-  );
+  return `${weekday} ${day} ${month}`;
 }
