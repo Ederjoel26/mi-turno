@@ -12,6 +12,10 @@ import {
   getAvailableSlots,
 } from "./services/booking.js";
 import { connectBaileys, getBaileysStatus } from "./services/baileys.js";
+import {
+  startReminderWorker,
+  stopReminderWorker,
+} from "./services/reminder-worker.js";
 
 const app = express();
 
@@ -239,9 +243,14 @@ if (env.baileysAutoConnect) {
   });
 }
 
+if (env.reminderWorkerEnabled) {
+  startReminderWorker();
+}
+
 async function shutdown(signal: string): Promise<void> {
   console.log(`Received ${signal}. Shutting down...`);
   server.close(async () => {
+    await stopReminderWorker();
     await pool.end();
     process.exit(0);
   });

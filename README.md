@@ -122,6 +122,22 @@ docker volume rm mi-turno_baileys_auth
 docker compose up -d
 ```
 
+## Recordatorios automáticos
+
+Cuando se crea una cita por `POST /appointments`, el backend agenda un `reminder_job` para enviarlo por WhatsApp `REMINDER_LEAD_MINUTES` antes del `starts_at`.
+
+- Si la cita se cancela con `POST /appointments/:appointmentId/cancel`, se eliminan los recordatorios pendientes.
+- El worker corre dentro del backend y procesa jobs pendientes cada `REMINDER_POLL_INTERVAL_MS`.
+- Reintenta hasta `REMINDER_MAX_ATTEMPTS` veces si falla el envío.
+
+Variables de entorno relevantes:
+
+- `REMINDER_WORKER_ENABLED` (default `true`)
+- `REMINDER_LEAD_MINUTES` (default `120`)
+- `REMINDER_POLL_INTERVAL_MS` (default `15000`)
+- `REMINDER_BATCH_SIZE` (default `20`)
+- `REMINDER_MAX_ATTEMPTS` (default `3`)
+
 ## Reset completo (entorno nuevo)
 
 Si queres reiniciar desde cero en otra compu o limpiar todo:

@@ -33,6 +33,27 @@ export function getBaileysStatus(): BaileysStatus {
   return { ...status };
 }
 
+function toWhatsappJid(phoneE164: string): string {
+  const digits = phoneE164.replace(/[^\d]/g, "");
+
+  if (!digits) {
+    throw new Error("Invalid WhatsApp phone number");
+  }
+
+  return `${digits}@s.whatsapp.net`;
+}
+
+export async function sendWhatsAppText(
+  phoneE164: string,
+  text: string,
+): Promise<void> {
+  if (!sock || !status.connected) {
+    throw new Error("Baileys is not connected");
+  }
+
+  await sock.sendMessage(toWhatsappJid(phoneE164), { text });
+}
+
 export async function connectBaileys(): Promise<void> {
   if (status.connected || sock) return;
 
