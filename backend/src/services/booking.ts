@@ -1,4 +1,5 @@
 import { PoolClient } from "pg";
+import { env } from "../config/env.js";
 import { pool } from "../db/pool.js";
 
 const ACTIVE_APPOINTMENT_STATUSES = ["pending", "confirmed"] as const;
@@ -198,13 +199,20 @@ export async function createAppointmentAtomic(
       ],
     );
 
-    await client.query("COMMIT");
-
     const created = insertAppointment.rows[0];
 
     if (!created) {
       throw new Error("Unable to create appointment");
     }
+
+    await scheduleReminderJob(
+      client,
+      created.id,
+      new Date(created.starts_at),
+      env.reminderLeadMinutes,
+    );
+
+    await client.query("COMMIT");
 
     return {
       id: created.id,
@@ -230,46 +238,92 @@ export async function cancelAppointment(
   appointmentId: string,
   reason?: string,
 ): Promise<CancelledAppointment> {
-  const result = await pool.query<{
-    id: string;
-    status: string;
-    updated_at: Date;
-  }>(
-    `
-      UPDATE appointments
-      SET
-        status = 'cancelled',
-        notes = CASE
-          WHEN $3::text IS NULL THEN notes
-          WHEN notes IS NULL OR notes = '' THEN $3
-          ELSE notes || E'\n' || $3
-        END,
-        updated_at = NOW()
-      WHERE id = $1
-        AND tenant_id = $2
-        AND status IN ('pending', 'confirmed')
-      RETURNING id, status, updated_at
-    `,
-    [appointmentId, tenantId, reason ?? null],
-  );
+  const client = await pool.connect();
 
-  const cancelled = result.rows[0];
+  try {
+    await client.query("BEGIN");
 
-  if (!cancelled) {
-    throw new AppointmentNotFoundError();
+    const result = await client.query<{
+      id: string;
+      status: string;
+      updated_at: Date;
+    }>(
+      `
+        UPDATE appointments
+        SET
+          status = 'cancelled',
+          notes = CASE
+            WHEN $3::text IS NULL THEN notes
+            WHEN notes IS NULL OR notes = '' THEN $3
+            ELSE notes || E'\n' || $3
+          END,
+          updated_at = NOW()
+        WHERE id = $1
+          AND tenant_id = $2
+          AND status IN ('pending', 'confirmed')
+        RETURNING id, status, updated_at
+      `,
+      [appointmentId, tenantId, reason ?? null],
+    );
+
+    const cancelled = result.rows[0];
+
+    if (!cancelled) {
+      throw new AppointmentNotFoundError();
+    }
+
+    await client.query(
+      `
+        DELETE FROM reminder_jobs
+        WHERE appointment_id = $1
+          AND sent_at IS NULL
+          AND failed_at IS NULL
+      `,
+      [appointmentId],
+    );
+
+    await client.query("COMMIT");
+
+    return {
+      id: cancelled.id,
+      status: cancelled.status,
+      updatedAt: cancelled.updated_at.toISOString(),
+    };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
   }
-
-  return {
-    id: cancelled.id,
-    status: cancelled.status,
-    updatedAt: cancelled.updated_at.toISOString(),
-  };
 }
 
 function validateDuration(value: number, fieldName: string): void {
   if (!Number.isInteger(value) || value <= 0) {
     throw new DomainValidationError(`${fieldName} must be a positive integer`);
   }
+}
+
+async function scheduleReminderJob(
+  client: PoolClient,
+  appointmentId: string,
+  startsAt: Date,
+  leadMinutes: number,
+): Promise<void> {
+  validateDuration(leadMinutes, "reminderLeadMinutes");
+
+  const sendAt = new Date(startsAt.getTime() - leadMinutes * 60_000);
+
+  if (sendAt <= new Date()) {
+    return;
+  }
+
+  await client.query(
+    `
+      INSERT INTO reminder_jobs (appointment_id, send_at)
+      VALUES ($1, $2)
+    `,
+    [appointmentId, sendAt.toISOString()],
+  );
 }
 
 function getWeekdayFromLocalDate(date: string): number {
