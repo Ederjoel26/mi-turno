@@ -7,6 +7,7 @@ import {
 } from "@whiskeysockets/baileys";
 import { rm } from "node:fs/promises";
 import { env } from "../config/env.js";
+import { setupWhatsAppHandler } from "./whatsapp-handler.js";
 
 type BaileysStatus = {
   connected: boolean;
@@ -95,6 +96,8 @@ export async function connectBaileys(): Promise<void> {
       version,
       auth: state,
     });
+
+    setupWhatsAppHandler(sock);
 
     sock.ev.on("creds.update", saveCreds);
 
