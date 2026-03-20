@@ -18,6 +18,20 @@ export type SessionPayload = {
   slotEndsAt?: string;
 
   customerName?: string;
+
+  pendingNaturalDate?: string;
+  pendingNaturalTime?: string;
+  pendingNaturalName?: string;
+  pendingNaturalBarberName?: string;
+
+  mode?: "booking" | "availability";
+
+  appointments?: {
+    id: string;
+    starts_at: string;
+    service: string;
+    provider: string;
+  }[];
 };
 
 let tenantName = "";
@@ -56,6 +70,8 @@ export async function getProviders(serviceId: string) {
   return res.rows;
 }
 
+const SESSION_TIMEOUT_HOURS = 2;
+
 export async function getOrCreateSession(phone: string) {
   const res = await pool.query(
     `
@@ -63,12 +79,25 @@ export async function getOrCreateSession(phone: string) {
   VALUES ($1,$2)
   ON CONFLICT (tenant_id,wa_phone_e164)
   DO UPDATE SET updated_at=NOW()
-  RETURNING state,payload
+  RETURNING state,payload,updated_at
   `,
     [DEFAULT_TENANT_ID, phone],
   );
 
-  return res.rows[0];
+  const session = res.rows[0];
+  
+  if (session && session.updated_at) {
+    const lastUpdate = new Date(session.updated_at);
+    const now = new Date();
+    const hoursDiff = (now.getTime() - lastUpdate.getTime()) / (1000 * 60 * 60);
+    
+    if (hoursDiff > SESSION_TIMEOUT_HOURS && session.state !== "menu") {
+      await updateSession(phone, "menu", {});
+      return { state: "menu", payload: {} };
+    }
+  }
+
+  return session;
 }
 
 export async function updateSession(
@@ -115,12 +144,31 @@ export async function getNextAvailableDays(
   return days;
 }
 
+export async function getPendingAppointmentsCount(phone: string): Promise<number> {
+  const waPhone = `+${phone}`;
+
+  const result = await pool.query(
+    `
+    SELECT COUNT(*) as count
+    FROM appointments a
+    JOIN customers c ON c.id = a.customer_id
+    WHERE c.wa_phone_e164 = $1
+      AND a.starts_at > NOW()
+      AND a.status IN ('pending', 'confirmed')
+    `,
+    [waPhone],
+  );
+
+  return parseInt(result.rows[0]?.count || "0");
+}
+
 export async function getAppointmentsByPhone(phone: string) {
   const waPhone = `+${phone}`;
 
   const result = await pool.query(
     `
 SELECT 
+a.id,
 a.starts_at,
 s.name AS service,
 p.name AS provider
@@ -129,6 +177,8 @@ JOIN services s ON s.id = a.service_id
 JOIN providers p ON p.id = a.provider_id
 JOIN customers c ON c.id = a.customer_id
 WHERE c.wa_phone_e164 = $1
+  AND a.starts_at > NOW()
+  AND a.status IN ('pending', 'confirmed')
 ORDER BY a.starts_at
 LIMIT 5
 `,
@@ -136,4 +186,18 @@ LIMIT 5
   );
 
   return result.rows;
+}
+
+export async function cancelAppointmentById(appointmentId: string) {
+  const result = await pool.query(
+    `
+    UPDATE appointments
+    SET status = 'cancelled', updated_at = NOW()
+    WHERE id = $1
+    RETURNING id
+    `,
+    [appointmentId],
+  );
+
+  return result.rows[0]?.id || null;
 }
