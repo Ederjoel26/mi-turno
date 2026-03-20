@@ -30,10 +30,13 @@ services:
         condition: service_healthy
     environment:
       NODE_ENV: development
+      CI: "true"
       PORT: 3001
       DATABASE_URL: postgresql://${POSTGRES_USER:-mi_turno_user}:${POSTGRES_PASSWORD:-mi_turno_pass}@postgres:5432/${POSTGRES_DB:-mi_turno}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
       BAILEYS_AUTH_DIR: ${BAILEYS_AUTH_DIR:-auth_info_baileys}
       BAILEYS_AUTO_CONNECT: ${BAILEYS_AUTO_CONNECT:-false}
+      BAILEYS_PAIRING_CODE_TTL_SECONDS: ${BAILEYS_PAIRING_CODE_TTL_SECONDS:-180}
       REMINDER_WORKER_ENABLED: ${REMINDER_WORKER_ENABLED:-true}
       REMINDER_LEAD_MINUTES: ${REMINDER_LEAD_MINUTES:-120}
       REMINDER_POLL_INTERVAL_MS: ${REMINDER_POLL_INTERVAL_MS:-15000}
@@ -47,24 +50,25 @@ services:
       - baileys_auth:/app/auth_info_baileys
     command: sh -c "pnpm dev"
 
-  # frontend:
-  #   build:
-  #     context: ./frontend
-  #     dockerfile: Dockerfile
-  #   container_name: mi-turno-frontend
-  #   restart: unless-stopped
-  #   depends_on:
-  #     - backend
-  #   environment:
-  #     NODE_ENV: development
-  #     PORT: 3000
-  #     NEXT_PUBLIC_API_URL: http://localhost:${BACKEND_PORT:-3001}
-  #   ports:
-  #     - "${FRONTEND_PORT:-3000}:3000"
-  #   volumes:
-  #     - ./frontend:/app
-  #     - frontend_node_modules:/app/node_modules
-  #   command: sh -c "pnpm install && pnpm dev"
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: mi-turno-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NODE_ENV: development
+      CI: "true"
+      PORT: 3000
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    command: sh -c "pnpm dev"
 
 volumes:
   postgres_data:

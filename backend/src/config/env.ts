@@ -17,8 +17,13 @@ export const env = {
   databaseUrl:
     process.env.DATABASE_URL ??
     "postgresql://mi_turno_user:mi_turno_pass@localhost:5432/mi_turno",
+  frontendOrigin: process.env.FRONTEND_ORIGIN ?? "http://localhost:3000",
   baileysAuthDir: process.env.BAILEYS_AUTH_DIR ?? "auth_info_baileys",
   baileysAutoConnect: process.env.BAILEYS_AUTO_CONNECT === "true",
+  baileysPairingCodeTtlSeconds: toNumber(
+    process.env.BAILEYS_PAIRING_CODE_TTL_SECONDS,
+    180,
+  ),
   reminderWorkerEnabled: toBoolean(process.env.REMINDER_WORKER_ENABLED, true),
   reminderLeadMinutes: toNumber(process.env.REMINDER_LEAD_MINUTES, 120),
   reminderPollIntervalMs: toNumber(process.env.REMINDER_POLL_INTERVAL_MS, 15_000),

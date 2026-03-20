@@ -33,9 +33,8 @@ docker compose up -d --build
 
 Servicios:
 - Backend: `http://localhost:3001`
+- Frontend: `http://localhost:3000`
 - PostgreSQL: `localhost:5432`
-
-Nota: el servicio de `frontend` esta comentado en `docker-compose.yml`, por eso no se levanta por defecto.
 
 ## Base de datos (MVP citas)
 
@@ -73,6 +72,10 @@ docker compose exec -T postgres psql -U ${POSTGRES_USER:-mi_turno_user} -d ${POS
 - `GET /baileys/status`
 - `POST /baileys/connect`
 - `GET /baileys/qr?format=svg|terminal|raw`
+- `GET /baileys/onboarding` (pantalla web simple para alta asistida)
+- `POST /baileys/pairing-code` (fallback sin segunda pantalla)
+- `POST /baileys/reconnect` (reinicia socket; opcionalmente limpia sesion)
+- `POST /baileys/disconnect` (desconecta; opcionalmente limpia sesion)
 
 Ejemplo rapido de prueba:
 
@@ -114,6 +117,46 @@ curl "http://localhost:3001/baileys/qr?format=terminal"
 curl "http://localhost:3001/baileys/status"
 ```
 
+4. Onboarding asistido (recomendado para vendedor/soporte):
+
+```bash
+open "http://localhost:3001/baileys/onboarding"
+```
+
+La pagina inicializa la conexion y refresca el QR automaticamente hasta que el numero queda vinculado.
+
+5. Fallback por codigo de vinculacion (cuando no hay segunda pantalla):
+
+```bash
+curl -X POST "http://localhost:3001/baileys/pairing-code" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "phoneE164": "+5491112345678"
+  }'
+```
+
+Con el `pairingCode`, el barbero entra a WhatsApp > Dispositivos vinculados > Vincular con numero de telefono.
+
+6. Forzar reconexion:
+
+```bash
+curl -X POST "http://localhost:3001/baileys/reconnect" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "clearAuth": false
+  }'
+```
+
+Si queres resetear vinculacion previa para un numero nuevo:
+
+```bash
+curl -X POST "http://localhost:3001/baileys/reconnect" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "clearAuth": true
+  }'
+```
+
 Si tenes error `401` de Baileys por credenciales viejas, limpia el volumen de auth:
 
 ```bash
@@ -137,6 +180,12 @@ Variables de entorno relevantes:
 - `REMINDER_POLL_INTERVAL_MS` (default `15000`)
 - `REMINDER_BATCH_SIZE` (default `20`)
 - `REMINDER_MAX_ATTEMPTS` (default `3`)
+
+Variables adicionales para onboarding WhatsApp y frontend:
+
+- `BAILEYS_PAIRING_CODE_TTL_SECONDS` (default `180`)
+- `FRONTEND_ORIGIN` (default `http://localhost:3000`)
+- `NEXT_PUBLIC_API_URL` (default `http://localhost:3001`)
 
 ## Reset completo (entorno nuevo)
 
